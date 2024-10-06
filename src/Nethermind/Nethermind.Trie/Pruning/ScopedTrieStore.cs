@@ -40,11 +40,6 @@ public sealed class ScopedTrieStore : IScopedTrieStore
 
     public INodeStorage.KeyScheme Scheme => _trieStoreImplementation.Scheme;
 
-    public void CommitNode(long blockNumber, NodeCommitInfo nodeCommitInfo, WriteFlags writeFlags = WriteFlags.None)
-    {
-        _trieStoreImplementation.CommitNode(blockNumber, _address, nodeCommitInfo, writeFlags);
-    }
-
     public TrieNode FinishBlockCommit(TrieType trieType, long blockNumber, TrieNode? root, bool skipRoot = false, WriteFlags writeFlags = WriteFlags.None)
     {
         return _trieStoreImplementation.FinishBlockCommit(trieType, blockNumber, _address, root, skipRoot: skipRoot, writeFlags: writeFlags);

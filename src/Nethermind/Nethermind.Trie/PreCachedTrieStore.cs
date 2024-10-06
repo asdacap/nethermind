@@ -34,11 +34,6 @@ public class PreCachedTrieStore : ITrieStore
         _inner.Dispose();
     }
 
-    public void CommitNode(long blockNumber, Hash256? address, in NodeCommitInfo nodeCommitInfo, WriteFlags writeFlags = WriteFlags.None)
-    {
-        _inner.CommitNode(blockNumber, address, in nodeCommitInfo, writeFlags);
-    }
-
     public TrieNode? FinishBlockCommit(TrieType trieType, long blockNumber, Hash256? address, TrieNode? root, bool skipRoot, WriteFlags writeFlags = WriteFlags.None)
     {
         return _inner.FinishBlockCommit(trieType, blockNumber, address, root, skipRoot, writeFlags);

@@ -13,8 +13,6 @@ namespace Nethermind.Trie.Pruning
     /// </summary>
     public interface ITrieStore : IDisposable
     {
-        void CommitNode(long blockNumber, Hash256? address, in NodeCommitInfo nodeCommitInfo, WriteFlags writeFlags = WriteFlags.None);
-
         TrieNode FinishBlockCommit(TrieType trieType, long blockNumber, Hash256? address, TrieNode? root, bool skipRoot = false, WriteFlags writeFlags = WriteFlags.None);
 
         bool IsPersisted(Hash256? address, in TreePath path, in ValueHash256 keccak);
