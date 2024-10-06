@@ -17,7 +17,11 @@ namespace Nethermind.Trie.Pruning
 
         public void CommitNode(long blockNumber, NodeCommitInfo nodeCommitInfo, WriteFlags flags = WriteFlags.None) { }
 
-        public void FinishBlockCommit(TrieType trieType, long blockNumber, TrieNode? root, WriteFlags flags = WriteFlags.None) { }
+        public TrieNode? FinishBlockCommit(TrieType trieType, long blockNumber, TrieNode? root,
+            bool skipRoot, WriteFlags flags = WriteFlags.None)
+        {
+            return root;
+        }
 
         public TrieNode FindCachedOrUnknown(in TreePath treePath, Hash256 hash) => new(NodeType.Unknown, hash);
 

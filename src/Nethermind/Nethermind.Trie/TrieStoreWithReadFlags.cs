@@ -16,14 +16,9 @@ public class TrieStoreWithReadFlags : TrieNodeResolverWithReadFlags, IScopedTrie
         _baseImplementation = implementation;
     }
 
-    public void CommitNode(long blockNumber, NodeCommitInfo nodeCommitInfo, WriteFlags writeFlags = WriteFlags.None)
+    public TrieNode? FinishBlockCommit(TrieType trieType, long blockNumber, TrieNode? root, bool skipRoot, WriteFlags writeFlags = WriteFlags.None)
     {
-        _baseImplementation.CommitNode(blockNumber, nodeCommitInfo, writeFlags);
-    }
-
-    public void FinishBlockCommit(TrieType trieType, long blockNumber, TrieNode? root, WriteFlags writeFlags = WriteFlags.None)
-    {
-        _baseImplementation.FinishBlockCommit(trieType, blockNumber, root, writeFlags);
+        return _baseImplementation.FinishBlockCommit(trieType, blockNumber, root, skipRoot, writeFlags);
     }
 
     public bool IsPersisted(in TreePath path, in ValueHash256 keccak)

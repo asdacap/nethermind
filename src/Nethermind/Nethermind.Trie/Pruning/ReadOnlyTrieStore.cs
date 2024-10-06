@@ -41,7 +41,11 @@ namespace Nethermind.Trie.Pruning
 
         public void CommitNode(long blockNumber, Hash256? address, in NodeCommitInfo nodeCommitInfo, WriteFlags flags = WriteFlags.None) { }
 
-        public void FinishBlockCommit(TrieType trieType, long blockNumber, Hash256? address, TrieNode? root, WriteFlags flags = WriteFlags.None) { }
+        public TrieNode? FinishBlockCommit(TrieType trieType, long blockNumber, Hash256? address, TrieNode? root,
+            bool skipRoot, WriteFlags flags = WriteFlags.None)
+        {
+            return root;
+        }
 
         public event EventHandler<ReorgBoundaryReached> ReorgBoundaryReached
         {
@@ -105,8 +109,9 @@ namespace Nethermind.Trie.Pruning
             {
             }
 
-            public void FinishBlockCommit(TrieType trieType, long blockNumber, TrieNode? root, WriteFlags writeFlags = WriteFlags.None)
+            public TrieNode? FinishBlockCommit(TrieType trieType, long blockNumber, TrieNode? root, bool skipRoot, WriteFlags writeFlags = WriteFlags.None)
             {
+                return root;
             }
 
             public bool IsPersisted(in TreePath path, in ValueHash256 keccak)

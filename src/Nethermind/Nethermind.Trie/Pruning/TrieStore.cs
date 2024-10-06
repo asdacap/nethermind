@@ -3,6 +3,7 @@
 
 using System;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
 using System.Linq;
@@ -10,7 +11,9 @@ using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
 using Nethermind.Core;
+using Nethermind.Core.Buffers;
 using Nethermind.Core.Collections;
+using Nethermind.Core.Cpu;
 using Nethermind.Core.Crypto;
 using Nethermind.Core.Extensions;
 using Nethermind.Logging;
@@ -24,6 +27,7 @@ namespace Nethermind.Trie.Pruning
     public class TrieStore : ITrieStore, IPruningTrieStore
     {
         private const int ShardedDirtyNodeCount = 256;
+        private readonly bool _parallelBranches = false;
 
         private int _isFirst;
 
@@ -146,6 +150,173 @@ namespace Nethermind.Trie.Pruning
                 int count = DirtyNodesCount();
                 Metrics.CachedNodesCount = count;
                 return count;
+            }
+        }
+
+        private ConcurrentQueue<Exception>? _commitExceptions;
+
+        private void CommitNode(IScopedTrieStore trieStore, NodeCommitInfo nodeCommitInfo, bool skipSelf = false)
+        {
+            TrieNode node = nodeCommitInfo.Node;
+            TreePath path = nodeCommitInfo.Path;
+            if (node!.IsBranch)
+            {
+                // idea from EthereumJ - testing parallel branches
+                if (!_parallelBranches || !nodeCommitInfo.IsRoot)
+                {
+                    for (int i = 0; i < 16; i++)
+                    {
+                        if (node.IsChildDirty(i))
+                        {
+                            TreePath childPath = node.GetChildPath(nodeCommitInfo.Path, i);
+                            CommitNode(trieStore, new NodeCommitInfo(node.GetChildWithChildPath(trieStore, ref childPath, i)!, node, childPath, i));
+                        }
+                        else
+                        {
+                            if (_logger.IsTrace)
+                            {
+                                Trace(node, ref path, i);
+                            }
+                        }
+                    }
+                }
+                else
+                {
+                    List<NodeCommitInfo> nodesToCommit = new(16);
+                    for (int i = 0; i < 16; i++)
+                    {
+                        if (node.IsChildDirty(i))
+                        {
+                            TreePath childPath = node.GetChildPath(nodeCommitInfo.Path, i);
+                            nodesToCommit.Add(new NodeCommitInfo(node.GetChildWithChildPath(trieStore, ref childPath, i)!, node, childPath, i));
+                        }
+                        else
+                        {
+                            if (_logger.IsTrace)
+                            {
+                                Trace(node, ref path, i);
+                            }
+                        }
+                    }
+
+                    if (nodesToCommit.Count >= 4)
+                    {
+                        ClearExceptions();
+                        Parallel.For(0, nodesToCommit.Count, RuntimeInformation.ParallelOptionsLogicalCores, i =>
+                        {
+                            try
+                            {
+                                CommitNode(trieStore, nodesToCommit[i]);
+                            }
+                            catch (Exception e)
+                            {
+                                AddException(e);
+                            }
+                        });
+
+                        if (WereExceptions())
+                        {
+                            ThrowAggregateExceptions();
+                        }
+                    }
+                    else
+                    {
+                        for (int i = 0; i < nodesToCommit.Count; i++)
+                        {
+                            CommitNode(trieStore, nodesToCommit[i]);
+                        }
+                    }
+                }
+            }
+            else if (node.NodeType == NodeType.Extension)
+            {
+                TreePath childPath = node.GetChildPath(nodeCommitInfo.Path, 0);
+                TrieNode extensionChild = node.GetChildWithChildPath(trieStore, ref childPath, 0);
+                if (extensionChild is null)
+                {
+                    ThrowInvalidExtension();
+                }
+
+                if (extensionChild.IsDirty)
+                {
+                    CommitNode(trieStore, new NodeCommitInfo(extensionChild, node, childPath, 0));
+                }
+                else
+                {
+                    if (_logger.IsTrace) TraceExtensionSkip(extensionChild);
+                }
+            }
+
+            node.ResolveKey(trieStore, ref path, nodeCommitInfo.IsRoot, bufferPool: _bufferPool);
+            node.Seal();
+
+            if (node.FullRlp.Length >= 32)
+            {
+                if (!skipSelf)
+                {
+                    EnqueueCommit(nodeCommitInfo);
+                }
+            }
+            else
+            {
+                if (_logger.IsTrace) TraceSkipInlineNode(node);
+            }
+
+            void EnqueueCommit(in NodeCommitInfo value)
+            {
+                ConcurrentQueue<NodeCommitInfo> queue = Volatile.Read(ref _currentCommit);
+                // Allocate queue if first commit made
+                queue ??= CreateQueue(ref _currentCommit);
+                queue.Enqueue(value);
+            }
+
+            void ClearExceptions() => _commitExceptions?.Clear();
+            bool WereExceptions() => _commitExceptions?.IsEmpty == false;
+
+            void AddException(Exception value)
+            {
+                ConcurrentQueue<Exception> queue = Volatile.Read(ref _commitExceptions);
+                // Allocate queue if first exception thrown
+                queue ??= CreateQueue(ref _commitExceptions);
+                queue.Enqueue(value);
+            }
+
+            [MethodImpl(MethodImplOptions.NoInlining)]
+            ConcurrentQueue<T> CreateQueue<T>(ref ConcurrentQueue<T> queueRef)
+            {
+                ConcurrentQueue<T> queue = new();
+                ConcurrentQueue<T> current = Interlocked.CompareExchange(ref queueRef, queue, null);
+                return (current is null) ? queue : current;
+            }
+
+            [DoesNotReturn]
+            [StackTraceHidden]
+            void ThrowAggregateExceptions() => throw new AggregateException(_commitExceptions);
+
+            [DoesNotReturn]
+            [StackTraceHidden]
+            static void ThrowInvalidExtension() => throw new InvalidOperationException("An attempt to store an extension without a child.");
+
+            [MethodImpl(MethodImplOptions.NoInlining)]
+            void Trace(TrieNode node, ref TreePath path, int i)
+            {
+                TrieNode child = node.GetChild(trieStore, ref path, i);
+                if (child is not null)
+                {
+                    _logger.Trace($"Skipping commit of {child}");
+                }
+            }
+
+            [MethodImpl(MethodImplOptions.NoInlining)]
+            void TraceExtensionSkip(TrieNode extensionChild)
+            {
+                _logger.Trace($"Skipping commit of {extensionChild}");
+            }
+
+            [MethodImpl(MethodImplOptions.NoInlining)]
+            void TraceSkipInlineNode(TrieNode node)
+            {
+                _logger.Trace($"Skipping commit of an inlined {node}");
             }
         }
 
@@ -286,11 +457,13 @@ namespace Nethermind.Trie.Pruning
                 throw new InvalidOperationException($"The hash of replacement node {cachedNodeCopy} is not the same as the original {node}.");
         }
 
-        public void FinishBlockCommit(TrieType trieType, long blockNumber, Hash256? address, TrieNode? root, WriteFlags writeFlags = WriteFlags.None)
+        public TrieNode FinishBlockCommit(TrieType trieType, long blockNumber, Hash256? address, TrieNode? root, bool skipRoot = false, WriteFlags writeFlags = WriteFlags.None)
         {
             ArgumentOutOfRangeException.ThrowIfNegative(blockNumber);
-            EnsureCommitSetExistsForBlock(blockNumber);
 
+            root = CommitNodeFromPatriciaTrie(blockNumber, address, root, skipRoot, writeFlags);
+
+            EnsureCommitSetExistsForBlock(blockNumber);
             try
             {
                 if (trieType == TrieType.State) // storage tries happen before state commits
@@ -339,7 +512,56 @@ namespace Nethermind.Trie.Pruning
             }
 
             Prune();
+
+            return root;
         }
+
+        private ConcurrentQueue<NodeCommitInfo>? _currentCommit;
+        public ICappedArrayPool? _bufferPool;
+
+        private TrieNode? CommitNodeFromPatriciaTrie(long blockNumber, Hash256? address, TrieNode? rootRef, bool skipRoot, WriteFlags writeFlags)
+        {
+            var trieStore = GetTrieStore(address);
+
+            if (rootRef is not null && rootRef.IsDirty)
+            {
+                CommitNode(trieStore, new NodeCommitInfo(rootRef, TreePath.Empty), skipSelf: skipRoot);
+                while (TryDequeueCommit(out NodeCommitInfo node))
+                {
+                    if (_logger.IsTrace) Trace(blockNumber, node);
+                    CommitNode(blockNumber, address, node, writeFlags: writeFlags);
+                }
+
+                // reset objects
+                TreePath path = TreePath.Empty;
+                rootRef!.ResolveKey(trieStore, ref path, true, bufferPool: _bufferPool);
+
+                return FindCachedOrUnknown(address, path, rootRef.Keccak);
+            }
+
+            if (_logger.IsDebug) Debug(blockNumber);
+
+            return rootRef;
+
+            bool TryDequeueCommit(out NodeCommitInfo value)
+            {
+                Unsafe.SkipInit(out value);
+                return _currentCommit?.TryDequeue(out value) ?? false;
+            }
+
+            [MethodImpl(MethodImplOptions.NoInlining)]
+            void Trace(long blockNumber, in NodeCommitInfo node)
+            {
+                _logger.Trace($"Committing {node} in {blockNumber}");
+            }
+
+            [MethodImpl(MethodImplOptions.NoInlining)]
+            void Debug(long blockNumber)
+            {
+                _logger.Debug($"Finished committing {rootRef?.Keccak} in block {blockNumber}");
+            }
+        }
+
 
         public event EventHandler<ReorgBoundaryReached>? ReorgBoundaryReached;
 

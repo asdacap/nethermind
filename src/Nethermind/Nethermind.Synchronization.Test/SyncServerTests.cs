@@ -700,13 +700,13 @@ public class SyncServerTests
             LimboLogs.Instance);
 
         Hash256 nodeKey = TestItem.KeccakA;
-        TrieNode node = new(NodeType.Leaf, nodeKey, TestItem.KeccakB.Bytes);
         IScopedTrieStore scopedTrieStore = trieStore.GetTrieStore(null);
-        scopedTrieStore.CommitNode(1, new NodeCommitInfo(node, TreePath.Empty));
-        scopedTrieStore.FinishBlockCommit(TrieType.State, 1, node);
+        PatriciaTree pt = new PatriciaTree(scopedTrieStore, LimboLogs.Instance);
+        pt.Set(nodeKey.Bytes, TestItem.KeccakB.BytesToArray());
+        pt.Commit(1);
 
         stateDb.KeyExists(nodeKey).Should().BeFalse();
-        ctx.SyncServer.GetNodeData(new[] { nodeKey }, CancellationToken.None, NodeDataType.All).Should().BeEquivalentTo(new[] { TestItem.KeccakB.BytesToArray() });
+        ctx.SyncServer.GetNodeData(new[] { pt.RootHash }, CancellationToken.None, NodeDataType.All).Should().BeEquivalentTo(new[] { TestItem.KeccakB.BytesToArray() });
     }
 
     private class Context

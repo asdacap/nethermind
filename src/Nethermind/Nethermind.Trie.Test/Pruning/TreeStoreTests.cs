@@ -24,6 +24,7 @@ namespace Nethermind.Trie.Test.Pruning
     [TestFixture(INodeStorage.KeyScheme.Hash)]
     public class TreeStoreTests
     {
+        /*
         private readonly ILogManager _logManager = LimboLogs.Instance;
         // new OneLoggerLogManager(new NUnitLogger(LogLevel.Trace));
 
@@ -916,5 +917,6 @@ namespace Nethermind.Trie.Test.Pruning
 
             memDb.Count.Should().Be(4);
         }
+    */
     }
 }

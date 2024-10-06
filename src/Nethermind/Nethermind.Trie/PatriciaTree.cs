@@ -40,9 +40,6 @@ namespace Nethermind.Trie
 
         private Stack<StackedNode>? _nodeStack;
 
-        private ConcurrentQueue<Exception>? _commitExceptions;
-        private ConcurrentQueue<NodeCommitInfo>? _currentCommit;
-
         public IScopedTrieStore TrieStore { get; }
         public ICappedArrayPool? _bufferPool;
 
@@ -138,211 +135,15 @@ namespace Nethermind.Trie
                 ThrowReadOnlyTrieException();
             }
 
-            if (RootRef is not null && RootRef.IsDirty)
-            {
-                Commit(new NodeCommitInfo(RootRef, TreePath.Empty), skipSelf: skipRoot);
-                while (TryDequeueCommit(out NodeCommitInfo node))
-                {
-                    if (_logger.IsTrace) Trace(blockNumber, node);
-                    TrieStore.CommitNode(blockNumber, node, writeFlags: writeFlags);
-                }
-
-                // reset objects
-                TreePath path = TreePath.Empty;
-                RootRef!.ResolveKey(TrieStore, ref path, true, bufferPool: _bufferPool);
-                SetRootHash(RootRef.Keccak!, true);
-            }
-
-            TrieStore.FinishBlockCommit(TrieType, blockNumber, RootRef, writeFlags);
+            var newRoot = TrieStore.FinishBlockCommit(TrieType, blockNumber, RootRef, skipRoot: skipRoot, writeFlags: writeFlags);
+            SetRootHash(newRoot?.Keccak, true); // But why?
 
             if (_logger.IsDebug) Debug(blockNumber);
-
-            bool TryDequeueCommit(out NodeCommitInfo value)
-            {
-                Unsafe.SkipInit(out value);
-                return _currentCommit?.TryDequeue(out value) ?? false;
-            }
-
-            [MethodImpl(MethodImplOptions.NoInlining)]
-            void Trace(long blockNumber, in NodeCommitInfo node)
-            {
-                _logger.Trace($"Committing {node} in {blockNumber}");
-            }
 
             [MethodImpl(MethodImplOptions.NoInlining)]
             void Debug(long blockNumber)
             {
                 _logger.Debug($"Finished committing {RootRef?.Keccak} in block {blockNumber}");
-            }
-        }
-
-        private void Commit(NodeCommitInfo nodeCommitInfo, bool skipSelf = false)
-        {
-            if (!_allowCommits)
-            {
-                ThrowReadOnlyTrieException();
-            }
-
-            TrieNode node = nodeCommitInfo.Node;
-            TreePath path = nodeCommitInfo.Path;
-            if (node!.IsBranch)
-            {
-                // idea from EthereumJ - testing parallel branches
-                if (!_parallelBranches || !nodeCommitInfo.IsRoot)
-                {
-                    for (int i = 0; i < 16; i++)
-                    {
-                        if (node.IsChildDirty(i))
-                        {
-                            TreePath childPath = node.GetChildPath(nodeCommitInfo.Path, i);
-                            Commit(new NodeCommitInfo(node.GetChildWithChildPath(TrieStore, ref childPath, i)!, node, childPath, i));
-                        }
-                        else
-                        {
-                            if (_logger.IsTrace)
-                            {
-                                Trace(node, ref path, i);
-                            }
-                        }
-                    }
-                }
-                else
-                {
-                    List<NodeCommitInfo> nodesToCommit = new(16);
-                    for (int i = 0; i < 16; i++)
-                    {
-                        if (node.IsChildDirty(i))
-                        {
-                            TreePath childPath = node.GetChildPath(nodeCommitInfo.Path, i);
-                            nodesToCommit.Add(new NodeCommitInfo(node.GetChildWithChildPath(TrieStore, ref childPath, i)!, node, childPath, i));
-                        }
-                        else
-                        {
-                            if (_logger.IsTrace)
-                            {
-                                Trace(node, ref path, i);
-                            }
-                        }
-                    }
-
-                    if (nodesToCommit.Count >= 4)
-                    {
-                        ClearExceptions();
-                        Parallel.For(0, nodesToCommit.Count, RuntimeInformation.ParallelOptionsLogicalCores, i =>
-                        {
-                            try
-                            {
-                                Commit(nodesToCommit[i]);
-                            }
-                            catch (Exception e)
-                            {
-                                AddException(e);
-                            }
-                        });
-
-                        if (WereExceptions())
-                        {
-                            ThrowAggregateExceptions();
-                        }
-                    }
-                    else
-                    {
-                        for (int i = 0; i < nodesToCommit.Count; i++)
-                        {
-                            Commit(nodesToCommit[i]);
-                        }
-                    }
-                }
-            }
-            else if (node.NodeType == NodeType.Extension)
-            {
-                TreePath childPath = node.GetChildPath(nodeCommitInfo.Path, 0);
-                TrieNode extensionChild = node.GetChildWithChildPath(TrieStore, ref childPath, 0);
-                if (extensionChild is null)
-                {
-                    ThrowInvalidExtension();
-                }
-
-                if (extensionChild.IsDirty)
-                {
-                    Commit(new NodeCommitInfo(extensionChild, node, childPath, 0));
-                }
-                else
-                {
-                    if (_logger.IsTrace) TraceExtensionSkip(extensionChild);
-                }
-            }
-
-            node.ResolveKey(TrieStore, ref path, nodeCommitInfo.IsRoot, bufferPool: _bufferPool);
-            node.Seal();
-
-            if (node.FullRlp.Length >= 32)
-            {
-                if (!skipSelf)
-                {
-                    EnqueueCommit(nodeCommitInfo);
-                }
-            }
-            else
-            {
-                if (_logger.IsTrace) TraceSkipInlineNode(node);
-            }
-
-            void EnqueueCommit(in NodeCommitInfo value)
-            {
-                ConcurrentQueue<NodeCommitInfo> queue = Volatile.Read(ref _currentCommit);
-                // Allocate queue if first commit made
-                queue ??= CreateQueue(ref _currentCommit);
-                queue.Enqueue(value);
-            }
-
-            void ClearExceptions() => _commitExceptions?.Clear();
-            bool WereExceptions() => _commitExceptions?.IsEmpty == false;
-
-            void AddException(Exception value)
-            {
-                ConcurrentQueue<Exception> queue = Volatile.Read(ref _commitExceptions);
-                // Allocate queue if first exception thrown
-                queue ??= CreateQueue(ref _commitExceptions);
-                queue.Enqueue(value);
-            }
-
-            [MethodImpl(MethodImplOptions.NoInlining)]
-            ConcurrentQueue<T> CreateQueue<T>(ref ConcurrentQueue<T> queueRef)
-            {
-                ConcurrentQueue<T> queue = new();
-                ConcurrentQueue<T> current = Interlocked.CompareExchange(ref queueRef, queue, null);
-                return (current is null) ? queue : current;
-            }
-
-            [DoesNotReturn]
-            [StackTraceHidden]
-            void ThrowAggregateExceptions() => throw new AggregateException(_commitExceptions);
-
-            [DoesNotReturn]
-            [StackTraceHidden]
-            static void ThrowInvalidExtension() => throw new InvalidOperationException("An attempt to store an extension without a child.");
-
-            [MethodImpl(MethodImplOptions.NoInlining)]
-            void Trace(TrieNode node, ref TreePath path, int i)
-            {
-                TrieNode child = node.GetChild(TrieStore, ref path, i);
-                if (child is not null)
-                {
-                    _logger.Trace($"Skipping commit of {child}");
-                }
-            }
-
-            [MethodImpl(MethodImplOptions.NoInlining)]
-            void TraceExtensionSkip(TrieNode extensionChild)
-            {
-                _logger.Trace($"Skipping commit of {extensionChild}");
-            }
-
-            [MethodImpl(MethodImplOptions.NoInlining)]
-            void TraceSkipInlineNode(TrieNode node)
-            {
-                _logger.Trace($"Skipping commit of an inlined {node}");
             }
         }
 

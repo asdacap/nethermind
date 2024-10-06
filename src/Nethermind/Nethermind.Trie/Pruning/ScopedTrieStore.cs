@@ -45,9 +45,9 @@ public sealed class ScopedTrieStore : IScopedTrieStore
         _trieStoreImplementation.CommitNode(blockNumber, _address, nodeCommitInfo, writeFlags);
     }
 
-    public void FinishBlockCommit(TrieType trieType, long blockNumber, TrieNode? root, WriteFlags writeFlags = WriteFlags.None)
+    public TrieNode FinishBlockCommit(TrieType trieType, long blockNumber, TrieNode? root, bool skipRoot = false, WriteFlags writeFlags = WriteFlags.None)
     {
-        _trieStoreImplementation.FinishBlockCommit(trieType, blockNumber, _address, root, writeFlags);
+        return _trieStoreImplementation.FinishBlockCommit(trieType, blockNumber, _address, root, skipRoot: skipRoot, writeFlags: writeFlags);
     }
 
     public bool IsPersisted(in TreePath path, in ValueHash256 keccak)
