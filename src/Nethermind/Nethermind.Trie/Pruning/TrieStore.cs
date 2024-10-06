@@ -155,7 +155,104 @@ namespace Nethermind.Trie.Pruning
 
         private ConcurrentQueue<Exception>? _commitExceptions;
 
-        private void CommitNode(IScopedTrieStore trieStore, long blockNumber, Hash256? address, ref TreePath path, TrieNode node, NodeCommitInfo nodeCommitInfo, WriteFlags writeFlags, bool skipSelf = false)
+        internal class Committer
+        {
+            internal long BlockNumber { get; set; }
+            internal WriteFlags WriteFlags { get; set; }
+            internal Hash256? Address { get; set; }
+            internal TrieStore TrieStore { get; set; }
+            internal ILogger _logger { get; set; }
+            internal IPruningStrategy _pruningStrategy { get; set; }
+
+            public void Commit(ref TreePath path, TrieNode node, NodeCommitInfo nodeCommitInfo)
+            {
+                if (_logger.IsTrace) TraceN(BlockNumber, nodeCommitInfo);
+
+                if (!nodeCommitInfo.IsEmptyBlockMarker && !node.IsBoundaryProofNode)
+                {
+                    if (node!.Keccak is null)
+                    {
+                        ThrowUnknownHash(node);
+                    }
+
+                    if (node!.LastSeen >= 0)
+                    {
+                        ThrowNodeHasBeenSeen(BlockNumber, node);
+                    }
+
+                    node = SaveOrReplaceInDirtyNodesCacheOrPersist(ref path, nodeCommitInfo, node);
+                    node.LastSeen = Math.Max(BlockNumber, node.LastSeen);
+
+                    TrieStore.CommittedNodesCount++;
+                }
+
+                [DoesNotReturn]
+                [StackTraceHidden]
+                static void ThrowUnknownHash(TrieNode node) => throw new TrieStoreException($"The hash of {node} should be known at the time of committing.");
+
+                [DoesNotReturn]
+                [StackTraceHidden]
+                static void ThrowNodeHasBeenSeen(long blockNumber, TrieNode node) => throw new TrieStoreException($"{nameof(TrieNode.LastSeen)} set on {node} committed at {blockNumber}.");
+            }
+
+            [MethodImpl(MethodImplOptions.NoInlining)]
+            void TraceN(long blockNumber, in NodeCommitInfo node)
+            {
+                _logger.Trace($"Committing {node} in {blockNumber}");
+            }
+
+            private TrieNode SaveOrReplaceInDirtyNodesCacheOrPersist(ref TreePath path, NodeCommitInfo nodeCommitInfo, TrieNode node)
+            {
+                if (_pruningStrategy.PruningEnabled)
+                {
+                    TrieStoreDirtyNodesCache.Key key = new TrieStoreDirtyNodesCache.Key(Address, path, node.Keccak);
+                    if (TrieStore.DirtyNodesTryGetValue(in key, out TrieNode cachedNodeCopy))
+                    {
+                        Metrics.LoadedFromCacheNodesCount++;
+                        if (!ReferenceEquals(cachedNodeCopy, node))
+                        {
+                            if (_logger.IsTrace) Trace(node, cachedNodeCopy);
+                            cachedNodeCopy.ResolveKey(TrieStore.GetTrieStore(Address), ref path, nodeCommitInfo.IsRoot);
+                            if (node.Keccak != cachedNodeCopy.Keccak)
+                            {
+                                ThrowNodeIsNotSame(node, cachedNodeCopy);
+                            }
+
+                            if (!nodeCommitInfo.IsRoot)
+                            {
+                                nodeCommitInfo.NodeParent!.ReplaceChildRef(nodeCommitInfo.ChildPositionAtParent, cachedNodeCopy);
+                            }
+
+                            node = cachedNodeCopy;
+                            Metrics.ReplacedNodesCount++;
+                        }
+                    }
+                    else
+                    {
+                        TrieStore.DirtyNodesSaveInCache(key, node);
+                    }
+                }
+                else
+                {
+                    TrieStore.PersistNode(Address, path, node, BlockNumber, WriteFlags);
+                }
+
+                return node;
+
+                [MethodImpl(MethodImplOptions.NoInlining)]
+                void Trace(TrieNode node, TrieNode cachedNodeCopy)
+                {
+                    _logger.Trace($"Replacing {node} with its cached copy {cachedNodeCopy}.");
+                }
+
+                [DoesNotReturn]
+                [StackTraceHidden]
+                static void ThrowNodeIsNotSame(TrieNode node, TrieNode cachedNodeCopy) =>
+                    throw new InvalidOperationException($"The hash of replacement node {cachedNodeCopy} is not the same as the original {node}.");
+            }
+        }
+
+        private void CommitNode(ITrieNodeResolver trieStore, Committer committer, ref TreePath path, TrieNode node, NodeCommitInfo nodeCommitInfo, bool skipSelf = false)
         {
             if (node!.IsBranch)
             {
@@ -168,9 +265,7 @@ namespace Nethermind.Trie.Pruning
                         {
                             int previousPathLength = node.AppendChildPath(ref path, i);
                             TrieNode childNode = node.GetChildWithChildPath(trieStore, ref path, i)!;
-                            CommitNode(trieStore, blockNumber, address, ref path, childNode,
-                                new NodeCommitInfo(node, i),
-                                writeFlags, skipSelf: false);
+                            CommitNode(trieStore, committer, ref path, childNode, new NodeCommitInfo(node, i), skipSelf: false);
                             path.TruncateMut(previousPathLength);
                         }
                         else
@@ -210,7 +305,7 @@ namespace Nethermind.Trie.Pruning
                             try
                             {
                                 (TreePath childPath, TrieNode childNode, NodeCommitInfo info) = nodesToCommit[i];
-                                CommitNode(trieStore, blockNumber, address, ref childPath, childNode, info, writeFlags, skipSelf: false);
+                                CommitNode(trieStore, committer, ref childPath, childNode, info, skipSelf: false);
                             }
                             catch (Exception e)
                             {
@@ -228,7 +323,7 @@ namespace Nethermind.Trie.Pruning
                         for (int i = 0; i < nodesToCommit.Count; i++)
                         {
                             (TreePath childPath, TrieNode childNode, NodeCommitInfo info) = nodesToCommit[i];
-                            CommitNode(trieStore, blockNumber, address, ref childPath, childNode, info, writeFlags, skipSelf: false);
+                            CommitNode(trieStore, committer, ref childPath, childNode, info, skipSelf: false);
                         }
                     }
                 }
@@ -244,7 +339,7 @@ namespace Nethermind.Trie.Pruning
 
                 if (extensionChild.IsDirty)
                 {
-                    CommitNode(trieStore, blockNumber, address, ref path, extensionChild, new NodeCommitInfo(node, 0), writeFlags, skipSelf: false);
+                    CommitNode(trieStore, committer, ref path, extensionChild, new NodeCommitInfo(node, 0), skipSelf: false);
                 }
                 else
                 {
@@ -261,8 +356,7 @@ namespace Nethermind.Trie.Pruning
             {
                 if (!skipSelf)
                 {
-                    if (_logger.IsTrace) TraceN(blockNumber, nodeCommitInfo);
-                    CommitNodeWithCommitInfo(blockNumber, address, ref path, node, nodeCommitInfo, writeFlags: writeFlags);
+                    committer.Commit(ref path, node, nodeCommitInfo);
                 }
             }
             else
@@ -318,62 +412,6 @@ namespace Nethermind.Trie.Pruning
             {
                 _logger.Trace($"Skipping commit of an inlined {node}");
             }
-
-            [MethodImpl(MethodImplOptions.NoInlining)]
-            void TraceN(long blockNumber, in NodeCommitInfo node)
-            {
-                _logger.Trace($"Committing {node} in {blockNumber}");
-            }
-        }
-
-        private void CommitNodeWithCommitInfo(long blockNumber, Hash256? address, ref TreePath path, TrieNode node, in NodeCommitInfo nodeCommitInfo, WriteFlags writeFlags = WriteFlags.None)
-        {
-            if (_logger.IsTrace) Trace(blockNumber, in nodeCommitInfo);
-            if (!nodeCommitInfo.IsEmptyBlockMarker && !node.IsBoundaryProofNode)
-            {
-                if (node!.Keccak is null)
-                {
-                    ThrowUnknownHash(node);
-                }
-
-                if (CurrentPackage is null)
-                {
-                    ThrowUnknownPackage(blockNumber, node);
-                }
-
-                if (node!.LastSeen >= 0)
-                {
-                    ThrowNodeHasBeenSeen(blockNumber, node);
-                }
-
-                node = SaveOrReplaceInDirtyNodesCache(address, ref path, nodeCommitInfo, node);
-                node.LastSeen = Math.Max(blockNumber, node.LastSeen);
-
-                if (!_pruningStrategy.PruningEnabled)
-                {
-                    PersistNode(address, path, node, blockNumber, writeFlags);
-                }
-
-                CommittedNodesCount++;
-            }
-
-            [MethodImpl(MethodImplOptions.NoInlining)]
-            void Trace(long blockNumber, in NodeCommitInfo nodeCommitInfo)
-            {
-                _logger.Trace($"Committing {nodeCommitInfo} at {blockNumber}");
-            }
-
-            [DoesNotReturn]
-            [StackTraceHidden]
-            static void ThrowUnknownHash(TrieNode node) => throw new TrieStoreException($"The hash of {node} should be known at the time of committing.");
-
-            [DoesNotReturn]
-            [StackTraceHidden]
-            static void ThrowUnknownPackage(long blockNumber, TrieNode node) => throw new TrieStoreException($"{nameof(CurrentPackage)} is NULL when committing {node} at {blockNumber}.");
-
-            [DoesNotReturn]
-            [StackTraceHidden]
-            static void ThrowNodeHasBeenSeen(long blockNumber, TrieNode node) => throw new TrieStoreException($"{nameof(TrieNode.LastSeen)} set on {node} committed at {blockNumber}.");
         }
 
         private int GetNodeShardIdx(in TreePath path, Hash256 hash) =>
@@ -410,52 +448,6 @@ namespace Nethermind.Trie.Pruning
 
         private TrieNode DirtyNodesFindCachedOrUnknown(TrieStoreDirtyNodesCache.Key key) =>
             GetDirtyNodeShard(key).FindCachedOrUnknown(key);
-
-        private TrieNode SaveOrReplaceInDirtyNodesCache(Hash256? address, ref TreePath path, NodeCommitInfo nodeCommitInfo, TrieNode node)
-        {
-            if (_pruningStrategy.PruningEnabled)
-            {
-                TrieStoreDirtyNodesCache.Key key = new TrieStoreDirtyNodesCache.Key(address, path, node.Keccak);
-                if (DirtyNodesTryGetValue(in key, out TrieNode cachedNodeCopy))
-                {
-                    Metrics.LoadedFromCacheNodesCount++;
-                    if (!ReferenceEquals(cachedNodeCopy, node))
-                    {
-                        if (_logger.IsTrace) Trace(node, cachedNodeCopy);
-                        cachedNodeCopy.ResolveKey(GetTrieStore(address), ref path, nodeCommitInfo.IsRoot);
-                        if (node.Keccak != cachedNodeCopy.Keccak)
-                        {
-                            ThrowNodeIsNotSame(node, cachedNodeCopy);
-                        }
-
-                        if (!nodeCommitInfo.IsRoot)
-                        {
-                            nodeCommitInfo.NodeParent!.ReplaceChildRef(nodeCommitInfo.ChildPositionAtParent, cachedNodeCopy);
-                        }
-
-                        node = cachedNodeCopy;
-                        Metrics.ReplacedNodesCount++;
-                    }
-                }
-                else
-                {
-                    DirtyNodesSaveInCache(key, node);
-                }
-            }
-
-            return node;
-
-            [MethodImpl(MethodImplOptions.NoInlining)]
-            void Trace(TrieNode node, TrieNode cachedNodeCopy)
-            {
-                _logger.Trace($"Replacing {node} with its cached copy {cachedNodeCopy}.");
-            }
-
-            [DoesNotReturn]
-            [StackTraceHidden]
-            static void ThrowNodeIsNotSame(TrieNode node, TrieNode cachedNodeCopy) =>
-                throw new InvalidOperationException($"The hash of replacement node {cachedNodeCopy} is not the same as the original {node}.");
-        }
 
         public TrieNode FinishBlockCommit(TrieType trieType, long blockNumber, Hash256? address, TrieNode? root, bool skipRoot = false, WriteFlags writeFlags = WriteFlags.None)
         {
@@ -527,7 +519,16 @@ namespace Nethermind.Trie.Pruning
             if (rootRef is not null && rootRef.IsDirty)
             {
                 TreePath path = TreePath.Empty;
-                CommitNode(trieStore, blockNumber, address, ref path, rootRef, new NodeCommitInfo(), writeFlags, skipSelf: skipRoot);
+                Committer committer = new Committer
+                {
+                    BlockNumber = blockNumber,
+                    WriteFlags = writeFlags,
+                    Address = address,
+                    TrieStore = this,
+                    _logger = _logger,
+                    _pruningStrategy = _pruningStrategy,
+                };
+                CommitNode(trieStore, committer, ref path, rootRef, new NodeCommitInfo(), skipSelf: skipRoot);
 
                 // reset objects
                 rootRef!.ResolveKey(trieStore, ref path, true, bufferPool: _bufferPool);
