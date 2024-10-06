@@ -155,7 +155,7 @@ namespace Nethermind.Trie.Pruning
 
         private ConcurrentQueue<Exception>? _commitExceptions;
 
-        private void CommitNode(IScopedTrieStore trieStore, NodeCommitInfo nodeCommitInfo, bool skipSelf = false)
+        private void CommitNode(IScopedTrieStore trieStore, long blockNumber, Hash256? address, NodeCommitInfo nodeCommitInfo, WriteFlags writeFlags, bool skipSelf = false)
         {
             TrieNode node = nodeCommitInfo.Node;
             TreePath path = nodeCommitInfo.Path;
@@ -169,7 +169,9 @@ namespace Nethermind.Trie.Pruning
                         if (node.IsChildDirty(i))
                         {
                             TreePath childPath = node.GetChildPath(nodeCommitInfo.Path, i);
-                            CommitNode(trieStore, new NodeCommitInfo(node.GetChildWithChildPath(trieStore, ref childPath, i)!, node, childPath, i));
+                            CommitNode(trieStore, blockNumber, address,
+                                new NodeCommitInfo(node.GetChildWithChildPath(trieStore, ref childPath, i)!, node, childPath, i),
+                                writeFlags, skipSelf: false);
                         }
                         else
                         {
@@ -206,7 +208,7 @@ namespace Nethermind.Trie.Pruning
                         {
                             try
                             {
-                                CommitNode(trieStore, nodesToCommit[i]);
+                                CommitNode(trieStore, blockNumber, address, nodesToCommit[i], writeFlags, skipSelf: false);
                             }
                             catch (Exception e)
                             {
@@ -223,7 +225,7 @@ namespace Nethermind.Trie.Pruning
                     {
                         for (int i = 0; i < nodesToCommit.Count; i++)
                         {
-                            CommitNode(trieStore, nodesToCommit[i]);
+                            CommitNode(trieStore, blockNumber, address, nodesToCommit[i], writeFlags, skipSelf: false);
                         }
                     }
                 }
@@ -239,7 +241,7 @@ namespace Nethermind.Trie.Pruning
 
                 if (extensionChild.IsDirty)
                 {
-                    CommitNode(trieStore, new NodeCommitInfo(extensionChild, node, childPath, 0));
+                    CommitNode(trieStore, blockNumber, address, new NodeCommitInfo(extensionChild, node, childPath, 0), writeFlags, skipSelf: false);
                 }
                 else
                 {
@@ -254,20 +256,13 @@ namespace Nethermind.Trie.Pruning
             {
                 if (!skipSelf)
                 {
-                    EnqueueCommit(nodeCommitInfo);
+                    if (_logger.IsTrace) TraceN(blockNumber, nodeCommitInfo);
+                    CommitNode(blockNumber, address, nodeCommitInfo, writeFlags: writeFlags);
                 }
             }
             else
             {
                 if (_logger.IsTrace) TraceSkipInlineNode(node);
-            }
-
-            void EnqueueCommit(in NodeCommitInfo value)
-            {
-                ConcurrentQueue<NodeCommitInfo> queue = Volatile.Read(ref _currentCommit);
-                // Allocate queue if first commit made
-                queue ??= CreateQueue(ref _currentCommit);
-                queue.Enqueue(value);
             }
 
             void ClearExceptions() => _commitExceptions?.Clear();
@@ -317,6 +312,12 @@ namespace Nethermind.Trie.Pruning
             void TraceSkipInlineNode(TrieNode node)
             {
                 _logger.Trace($"Skipping commit of an inlined {node}");
+            }
+
+            [MethodImpl(MethodImplOptions.NoInlining)]
+            void TraceN(long blockNumber, in NodeCommitInfo node)
+            {
+                _logger.Trace($"Committing {node} in {blockNumber}");
             }
         }
 
@@ -516,7 +517,6 @@ namespace Nethermind.Trie.Pruning
             return root;
         }
 
-        private ConcurrentQueue<NodeCommitInfo>? _currentCommit;
         public ICappedArrayPool? _bufferPool;
 
         private TrieNode? CommitNodeFromPatriciaTrie(long blockNumber, Hash256? address, TrieNode? rootRef, bool skipRoot, WriteFlags writeFlags)
@@ -525,12 +525,7 @@ namespace Nethermind.Trie.Pruning
 
             if (rootRef is not null && rootRef.IsDirty)
             {
-                CommitNode(trieStore, new NodeCommitInfo(rootRef, TreePath.Empty), skipSelf: skipRoot);
-                while (TryDequeueCommit(out NodeCommitInfo node))
-                {
-                    if (_logger.IsTrace) Trace(blockNumber, node);
-                    CommitNode(blockNumber, address, node, writeFlags: writeFlags);
-                }
+                CommitNode(trieStore, blockNumber, address, new NodeCommitInfo(rootRef, TreePath.Empty), writeFlags, skipSelf: skipRoot);
 
                 // reset objects
                 TreePath path = TreePath.Empty;
@@ -542,18 +537,6 @@ namespace Nethermind.Trie.Pruning
             if (_logger.IsDebug) Debug(blockNumber);
 
             return rootRef;
-
-            bool TryDequeueCommit(out NodeCommitInfo value)
-            {
-                Unsafe.SkipInit(out value);
-                return _currentCommit?.TryDequeue(out value) ?? false;
-            }
-
-            [MethodImpl(MethodImplOptions.NoInlining)]
-            void Trace(long blockNumber, in NodeCommitInfo node)
-            {
-                _logger.Trace($"Committing {node} in {blockNumber}");
-            }
 
             [MethodImpl(MethodImplOptions.NoInlining)]
             void Debug(long blockNumber)
