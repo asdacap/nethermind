@@ -2,10 +2,12 @@
 // SPDX-License-Identifier: LGPL-3.0-only
 
 using System;
+using Nethermind.Blockchain.Headers;
 using Nethermind.Blockchain.Tracing;
 using Nethermind.Consensus.Processing;
 using Nethermind.Core;
 using Nethermind.Core.Specs;
+using Nethermind.Evm.State;
 
 namespace Nethermind.Consensus.Stateless;
 
@@ -15,15 +17,16 @@ public interface IExistingBlockWitnessCollector
 }
 
 public class WitnessCollector(
-    WitnessGeneratingWorldState worldState,
+    IWorldState worldState,
+    WitnessStore witnessStore,
+    IHeaderFinder headerFinder,
     IBlockProcessor blockProcessor,
     ISpecProvider specProvider) : IExistingBlockWitnessCollector
 {
     public Witness GetWitnessForExistingBlock(BlockHeader parentHeader, Block block)
     {
-        Console.Error.WriteLine("Getting Witness for block {0}", block.Number);
         using IDisposable? scope = worldState.BeginScope(parentHeader);
         blockProcessor.ProcessOne(block, ProcessingOptions.ReadOnlyChain, NullBlockTracer.Instance, specProvider.GetSpec(block.Header));
-        return worldState.GetWitness(parentHeader);
+        return witnessStore.GetWitness(parentHeader, headerFinder);
     }
 }

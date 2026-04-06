@@ -100,8 +100,9 @@ public partial class DebugRpcModuleTests
         WitnessCapturingTrieStore capturingTrieStore = new(readOnlyTrieStore);
         StateReader stateReader = new(capturingTrieStore, readOnlyDbProvider.CodeDb, blockchain.LogManager);
         WorldState worldState = new(new TrieStoreScopeProvider(capturingTrieStore, readOnlyDbProvider.CodeDb, blockchain.LogManager), blockchain.LogManager);
-        WitnessGeneratingHeaderFinder headerFinder = new(blockchain.Container.Resolve<IHeaderFinder>());
-        WitnessGeneratingWorldState witnessState = new(worldState, stateReader, capturingTrieStore, headerFinder);
+        WitnessStore witnessStore = new(stateReader, capturingTrieStore);
+        IHeaderFinder headerFinder = new WitnessGeneratingHeaderFinder(blockchain.Container.Resolve<IHeaderFinder>(), witnessStore);
+        WitnessGeneratingWorldState witnessState = new(worldState, witnessStore);
 
         using (witnessState.BeginScope(parent))
         {
@@ -126,7 +127,7 @@ public partial class DebugRpcModuleTests
 
             // GetWitness runs AccountProofCollector tree visitor for all recorded slots,
             // which traverses the trie and captures proof nodes even for not-read-and-set-but-reverted slots
-            using Witness witness = witnessState.GetWitness(parent);
+            using Witness witness = witnessStore.GetWitness(parent, headerFinder);
 
             // Collect the expected storage proof from the parent state
             AccountProofCollector collector = new(contractAddress, [storageSlot]);

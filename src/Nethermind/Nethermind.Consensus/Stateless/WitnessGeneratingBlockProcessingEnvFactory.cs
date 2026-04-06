@@ -2,12 +2,14 @@
 // SPDX-License-Identifier: LGPL-3.0-only
 
 using System;
+using System.Collections.Generic;
 using Autofac;
+using Autofac.Features.AttributeFilters;
 using Nethermind.Blockchain;
 using Nethermind.Blockchain.Headers;
-using Nethermind.Consensus.Rewards;
+using Nethermind.Blockchain.Receipts;
 using Nethermind.Core;
-using Nethermind.Core.Specs;
+using Nethermind.Core.Container;
 using Nethermind.Db;
 using Nethermind.Evm.State;
 using Nethermind.Logging;
@@ -35,30 +37,28 @@ public sealed class ExecutionRecordingScope(ILifetimeScope envLifetimeScope) : I
 public class WitnessGeneratingBlockProcessingEnvFactory(
     ILifetimeScope rootLifetimeScope,
     IWorldStateManager worldStateManager,
-    IDbProvider dbProvider,
+    [KeyFilter(DbNames.Code)] IDb codeDb,
+    IReadOnlyList<IBlockValidationModule> validationModules,
     ILogManager logManager) : IWitnessGeneratingBlockProcessingEnvFactory
 {
     public IWitnessGeneratingBlockProcessingEnvScope CreateScope()
     {
-        IReadOnlyDbProvider readOnlyDbProvider = new ReadOnlyDbProvider(dbProvider, true);
         WitnessCapturingTrieStore trieStore = new(worldStateManager.CreateReadOnlyTrieStore());
-        IStateReader stateReader = new StateReader(trieStore, readOnlyDbProvider.CodeDb, logManager);
-        IWorldState worldState = new WorldState(new TrieStoreScopeProvider(trieStore, readOnlyDbProvider.CodeDb, logManager), logManager);
+        IStateReader stateReader = new StateReader(trieStore, codeDb, logManager);
+        WitnessStore witnessStore = new(stateReader, trieStore);
 
         ILifetimeScope envLifetimeScope = rootLifetimeScope.BeginLifetimeScope(builder => builder
+            .AddScoped<WitnessCapturingTrieStore>(trieStore)
             .AddScoped<IStateReader>(stateReader)
-            .AddScoped<IWorldState>(worldState)
-            .AddScoped<IWitnessGeneratingBlockProcessingEnv>(builder =>
-                new WitnessGeneratingBlockProcessingEnv(
-                    builder.Resolve<ISpecProvider>(),
-                    builder.Resolve<IWorldState>(),
-                    builder.Resolve<IStateReader>(),
-                    trieStore,
-                    builder.Resolve<IReadOnlyBlockTree>(),
-                    builder.Resolve<ISealValidator>(),
-                    builder.Resolve<IRewardCalculator>(),
-                    builder.Resolve<IHeaderStore>(),
-                    logManager)));
+            .AddScoped<IWorldStateScopeProvider>(new TrieStoreScopeProvider(trieStore, codeDb, logManager))
+            .AddScoped<WitnessStore>(witnessStore)
+            .AddDecorator<IHeaderFinder>((_, inner) =>
+                new WitnessGeneratingHeaderFinder(inner, witnessStore))
+            .AddScoped<IBlockhashCache, BlockhashCache>()
+            .AddDecorator<IWorldState, WitnessGeneratingWorldState>()
+            .AddModule(validationModules)
+            .AddScoped<IReceiptStorage>(NullReceiptStorage.Instance)
+            .AddScoped<IWitnessGeneratingBlockProcessingEnv, WitnessGeneratingBlockProcessingEnv>());
 
         return new ExecutionRecordingScope(envLifetimeScope);
     }
