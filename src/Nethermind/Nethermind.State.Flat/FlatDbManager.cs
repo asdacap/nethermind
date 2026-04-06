@@ -235,6 +235,7 @@ public class FlatDbManager : IFlatDbManager, IAsyncDisposable
 
     public ReadOnlySnapshotBundle GatherReadOnlySnapshotBundle(in StateId baseBlock)
     {
+        Console.Error.WriteLine($"Gather {baseBlock}");
         // Note to self: The current verdict on trying to use a linked list of snapshots is that it is error prone and
         // hard to pull of due to the constantly moving chain making invalidation hard.
         if (_logger.IsTrace) _logger.Trace($"Gathering {baseBlock}.");
@@ -286,6 +287,10 @@ public class FlatDbManager : IFlatDbManager, IAsyncDisposable
                 {
                     persistenceReader.Dispose();
                     throw new InvalidOperationException($"Unable to gather snapshots for state {baseBlock}.");
+                }
+                else
+                {
+                    Console.WriteLine($"Snapshot same as persisted");
                 }
             }
             else
@@ -390,11 +395,13 @@ public class FlatDbManager : IFlatDbManager, IAsyncDisposable
         if (_logger.IsInfo) _logger.Info("FlatDbManager FlushCache started.");
 
         StateId persistedState = _persistenceManager.FlushToPersistence();
+        Console.Error.WriteLine($"Flush and got {persistedState}.");
 
         if (cancellationToken.IsCancellationRequested) return;
         if (persistedState.BlockNumber < 0) return;
 
         _snapshotRepository.RemoveStatesUntil(persistedState);
+        Console.Error.WriteLine($"Removed");
 
         ClearReadOnlyBundleCache();
         _trieNodeCache.Clear();

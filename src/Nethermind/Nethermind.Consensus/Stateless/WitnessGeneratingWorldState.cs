@@ -17,6 +17,8 @@ using Nethermind.Evm.Tracing.State;
 using Nethermind.Int256;
 using Nethermind.State;
 using Nethermind.State.Proofs;
+using Nethermind.Trie;
+using Nethermind.Trie.Pruning;
 
 namespace Nethermind.Consensus.Stateless;
 
@@ -46,6 +48,19 @@ public class WitnessGeneratingWorldState(IWorldState inner, IStateReader stateRe
         // as anyway all keys recorded in this file should either be read or written to. In both cases, we want
         // trie traversal with trie nodes capture along the path to be compatible with other clients.
         //
+
+        if (!trieStore.TouchedNodesRlp.Any())
+        {
+            // When there are no storage slots or account read at all, because of the lazy optimization of the TrieNode
+            // and skipping recording when node is of unknown type, the root node is not recorded at all.
+            // So we explicitly resolve it here. This may seems to work in most case as the TrieNode tend to be cached
+            // especially the root node,
+            ITrieNodeResolver stateResolver = trieStore.GetTrieStore(null);
+            TreePath path = TreePath.Empty;
+            TrieNode node = stateResolver.FindCachedOrUnknown(path, parentHeader.StateRoot!);
+            node.ResolveNode(stateResolver, path);
+        }
+
         using PooledSet<byte[]> stateNodes = new(trieStore.TouchedNodesRlp, Bytes.EqualityComparer);
         foreach ((Address account, HashSet<UInt256> slots) in _storageSlots)
         {

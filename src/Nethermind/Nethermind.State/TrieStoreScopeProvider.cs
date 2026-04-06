@@ -25,7 +25,7 @@ public class TrieStoreScopeProvider : IWorldStateScopeProvider
 {
     private readonly ITrieStore _trieStore;
     private readonly ILogManager _logManager;
-    protected StateTree _backingStateTree;
+    //protected StateTree _backingStateTree;
     private readonly KeyValueWithBatchingBackedCodeDb _codeDb;
 
     public TrieStoreScopeProvider(ITrieStore trieStore, IKeyValueStoreWithBatching codeDb, ILogManager logManager)
@@ -33,8 +33,6 @@ public class TrieStoreScopeProvider : IWorldStateScopeProvider
         _trieStore = trieStore;
         _logManager = logManager;
         _codeDb = new KeyValueWithBatchingBackedCodeDb(codeDb);
-
-        _backingStateTree = CreateStateTree();
     }
 
     protected virtual StateTree CreateStateTree()
@@ -50,6 +48,7 @@ public class TrieStoreScopeProvider : IWorldStateScopeProvider
     public IWorldStateScopeProvider.IScope BeginScope(BlockHeader? baseBlock)
     {
         var trieStoreCloser = _trieStore.BeginScope(baseBlock);
+        var _backingStateTree = CreateStateTree();
         _backingStateTree.RootHash = baseBlock?.StateRoot ?? Keccak.EmptyTreeHash;
 
         return new TrieStoreWorldStateBackendScope(_backingStateTree, this, _codeDb, trieStoreCloser, _logManager);
@@ -74,6 +73,7 @@ public class TrieStoreScopeProvider : IWorldStateScopeProvider
 
         public Account? Get(Address address)
         {
+            Console.Error.WriteLine($"Getting account {address}");
             ref Account? account = ref CollectionsMarshal.GetValueRefOrAddDefault(_loadedAccounts, address, out bool exists);
             if (!exists)
             {

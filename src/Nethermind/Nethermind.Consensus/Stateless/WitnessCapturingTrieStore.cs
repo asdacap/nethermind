@@ -26,6 +26,7 @@ public class WitnessCapturingTrieStore(IReadOnlyTrieStore baseStore) : ITrieStor
     public TrieNode FindCachedOrUnknown(Hash256? address, in TreePath path, Hash256 hash)
     {
         TrieNode node = baseStore.FindCachedOrUnknown(address, in path, hash);
+        Console.Error.WriteLine($"Find cached or unknown path: {path}. {node.Keccak}. {node.NodeType}. {Environment.StackTrace}");
         if (node.NodeType != NodeType.Unknown) _rlpCollector.TryAdd(node.Keccak, node.FullRlp.ToArray());
         return node;
     }
@@ -33,6 +34,7 @@ public class WitnessCapturingTrieStore(IReadOnlyTrieStore baseStore) : ITrieStor
     public byte[]? LoadRlp(Hash256? address, in TreePath path, Hash256 hash, ReadFlags flags = ReadFlags.None)
     {
         byte[]? rlp = TryLoadRlp(address, in path, hash, flags);
+        Console.Error.WriteLine($"Find cached 2 or unknown path: {path}.");
         if (rlp is null) throw new MissingTrieNodeException("Missing RLP node", address, path, hash);
         return rlp;
     }
@@ -40,15 +42,24 @@ public class WitnessCapturingTrieStore(IReadOnlyTrieStore baseStore) : ITrieStor
     public byte[]? TryLoadRlp(Hash256? address, in TreePath path, Hash256 hash, ReadFlags flags = ReadFlags.None)
     {
         byte[]? rlp = baseStore.TryLoadRlp(address, in path, hash, flags);
+        Console.Error.WriteLine($"Find cached 4 or unknown path: {path}.");
         if (rlp is not null) _rlpCollector.TryAdd(hash, rlp);
         return rlp;
     }
 
     public bool HasRoot(Hash256 stateRoot) => baseStore.HasRoot(stateRoot);
 
-    public IDisposable BeginScope(BlockHeader? baseBlock) => baseStore.BeginScope(baseBlock);
+    public IDisposable BeginScope(BlockHeader? baseBlock)
+    {
+        Console.Error.WriteLine("Beginning scope");
+        return baseStore.BeginScope(baseBlock);
+    }
 
-    public IScopedTrieStore GetTrieStore(Hash256? address) => new ScopedTrieStore(this, address);
+    public IScopedTrieStore GetTrieStore(Hash256? address)
+    {
+        Console.Error.WriteLine($"Getting trie store {address}");
+        return new ScopedTrieStore(this, address);
+    }
 
     public INodeStorage.KeyScheme Scheme => baseStore.Scheme;
 

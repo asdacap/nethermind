@@ -19,8 +19,10 @@ public class HealingWorldStateScopeProvider(ITrieStore trieStore, IKeyValueStore
         return new HealingStateTree(_trieStore, nodeStorage, recovery, _logManager);
     }
 
+    /*
     protected override StorageTree CreateStorageTree(Address address, Hash256 storageRoot)
     {
-        return new HealingStorageTree(_trieStore.GetTrieStore(address), nodeStorage, storageRoot, _logManager, address, _backingStateTree.RootHash, recovery);
+        // return new HealingStorageTree(_trieStore.GetTrieStore(address), nodeStorage, storageRoot, _logManager, address, _backingStateTree.RootHash, recovery);
     }
+    */
 }

@@ -131,8 +131,10 @@ public class SnapshotRepository(ILogManager logManager) : ISnapshotRepository
 
     public bool TryAddSnapshot(Snapshot snapshot)
     {
+        Console.Error.WriteLine("Adding snapshot " + snapshot.To);
         if (_snapshots.TryAdd(snapshot.To, snapshot))
         {
+            Console.Error.WriteLine("Add ok");
             Metrics.SnapshotCount++;
 
             long totalBytes = snapshot.EstimateMemory();
@@ -181,6 +183,7 @@ public class SnapshotRepository(ILogManager logManager) : ISnapshotRepository
 
     public void RemoveAndReleaseKnownState(StateId stateId)
     {
+        Console.Error.WriteLine("Remove snapshot " + stateId);
         if (_snapshots.TryRemove(stateId, out Snapshot? existingState))
         {
             Metrics.SnapshotCount--;
